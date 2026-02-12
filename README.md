@@ -4,6 +4,9 @@ Read this in: [Español](README.es.md)
 
 Ethos is a productivity app with authentication, focus sessions, habit tracking, and progress analytics.
 
+## Main View
+![Focus View](docs/focus_view.png)  
+
 ## Core Features
 
 - Auth with cookie session (`/auth/login`, `/auth/me`, `/auth/logout`)
@@ -52,3 +55,11 @@ docker compose -f docker-compose.yml exec api alembic upgrade head
 ## Notes
 
 - For mobile notifications on iOS, install as PWA and allow notifications.
+
+## More Views 
+
+![Habits View](docs/habits_view.png)  
+
+
+![Stats View](docs/stats_view.png)  
+
