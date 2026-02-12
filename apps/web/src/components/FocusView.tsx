@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api, FocusSession } from "../lib/api";
+import { api, FocusSession, Goal } from "../lib/api";
+import {
+  notifyFocusSessionCompleted,
+  requestNotificationPermissionIfNeeded,
+} from "../lib/notifications";
 
-const MIN_MINUTES = 0;
+const MIN_MINUTES = 5;
 const MAX_MINUTES = 120;
 const STEP_MINUTES = 5;
-const DEFAULT_MINUTES = 0;
+const DEFAULT_MINUTES = 25;
 
 type Props = {
   onStatus: (message: string) => void;
@@ -32,16 +36,16 @@ function formatMinutesLabel(minutes: number) {
 
 function remainingSecondsFor(session: FocusSession, now: Date) {
   const started = new Date(session.started_at).getTime();
-  const pausedSeconds = session.paused_seconds || 0;
-  const pauseStart = session.paused_at ? new Date(session.paused_at).getTime() : null;
-  const effectiveNow = pauseStart && session.status === "paused" ? pauseStart : now.getTime();
-  const elapsed = Math.floor((effectiveNow - started) / 1000) - pausedSeconds;
+  const elapsed = Math.floor((now.getTime() - started) / 1000) - (session.paused_seconds || 0);
   return session.duration_seconds - Math.max(0, elapsed);
 }
 
 export function FocusView({ onStatus }: Props) {
   const options = useMemo(buildOptions, []);
   const [selectedMinutes, setSelectedMinutes] = useState(DEFAULT_MINUTES);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [goalsById, setGoalsById] = useState<Record<number, Goal>>({});
+  const [selectedGoalId, setSelectedGoalId] = useState<number | null>(null);
   const [activeSession, setActiveSession] = useState<FocusSession | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [history, setHistory] = useState<FocusSession[]>([]);
@@ -53,20 +57,11 @@ export function FocusView({ onStatus }: Props) {
   const pollInFlightRef = useRef(false);
   const hadActiveRef = useRef(false);
   const completingRef = useRef(false);
+  const notifiedCompletedIdsRef = useRef<Set<number>>(new Set());
   const dialProgress = (selectedMinutes - MIN_MINUTES) / (MAX_MINUTES - MIN_MINUTES);
-  // Keep the knob aligned with the progress stroke (full 360deg sweep).
-  const dialAngle = dialProgress * 360;
-  const dialRadians = (dialAngle * Math.PI) / 180;
-  const dialRadius = 90;
-  const dialCenter = 110;
-  const dialX = dialCenter + dialRadius * Math.cos(dialRadians);
-  const dialY = dialCenter + dialRadius * Math.sin(dialRadians);
 
   useEffect(() => {
     refresh();
-    pollRef.current = window.setInterval(() => {
-      pollActive();
-    }, 5000);
     return () => {
       if (tickingRef.current) {
         window.clearInterval(tickingRef.current);
@@ -76,6 +71,24 @@ export function FocusView({ onStatus }: Props) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (activeSession && activeSession.status === "running") {
+      pollRef.current = window.setInterval(() => {
+        pollActive();
+      }, 5000);
+    }
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [activeSession]);
 
   useEffect(() => {
     if (tickingRef.current) {
@@ -90,6 +103,10 @@ export function FocusView({ onStatus }: Props) {
     }
 
     if (activeSession) {
+      if (activeSession.status === "canceled") {
+        setRemainingSeconds(0);
+        return;
+      }
       setRemainingSeconds(remainingSecondsFor(activeSession, new Date()));
     } else {
       setRemainingSeconds(null);
@@ -114,15 +131,44 @@ export function FocusView({ onStatus }: Props) {
     }
   }, [activeSession, remainingSeconds, onStatus]);
 
+  useEffect(() => {
+    if (!activeSession || activeSession.status !== "completed") return;
+    if (notifiedCompletedIdsRef.current.has(activeSession.id)) return;
+    notifiedCompletedIdsRef.current.add(activeSession.id);
+    const goalName = activeSession.goal_id ? goalsById[activeSession.goal_id]?.name : undefined;
+    notifyFocusSessionCompleted(goalName);
+  }, [activeSession, goalsById]);
+
   async function refresh() {
     setLoading(true);
     setError("");
     try {
-      const [active, sessions] = await Promise.all([api.focusActive(), api.focusSessions(20, 0)]);
+      const [active, sessions, goalsResponse] = await Promise.all([
+        api.focusCurrent(),
+        api.focusSessions(20, 0),
+        api.goals(200, 0),
+      ]);
       setActiveSession(active);
       hadActiveRef.current = Boolean(active);
-      setHistory(sessions.items);
-      setHistoryTotal(sessions.total);
+      const todayKey = new Date().toDateString();
+      const filtered = sessions.items.filter(
+        (session) => new Date(session.started_at).toDateString() === todayKey
+      );
+      setHistory(filtered);
+      setHistoryTotal(filtered.length);
+      const allGoals = goalsResponse.items;
+      const goalMap: Record<number, Goal> = {};
+      for (const goal of allGoals) {
+        goalMap[goal.id] = goal;
+      }
+      setGoalsById(goalMap);
+      const timeGoals = allGoals.filter(
+        (goal) => goal.is_active && goal.goal_type === "time"
+      );
+      setGoals(timeGoals);
+      if (timeGoals.length > 0 && selectedGoalId === null) {
+        setSelectedGoalId(timeGoals[0].id);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -134,7 +180,7 @@ export function FocusView({ onStatus }: Props) {
     if (pollInFlightRef.current) return;
     pollInFlightRef.current = true;
     try {
-      const active = await api.focusActive();
+      const active = await api.focusCurrent();
       setActiveSession(active);
       if (active) {
         hadActiveRef.current = true;
@@ -152,22 +198,27 @@ export function FocusView({ onStatus }: Props) {
 
   async function refreshHistory() {
     const sessions = await api.focusSessions(20, 0);
-    setHistory(sessions.items);
-    setHistoryTotal(sessions.total);
+    const todayKey = new Date().toDateString();
+    const filtered = sessions.items.filter(
+      (session) => new Date(session.started_at).toDateString() === todayKey
+    );
+    setHistory(filtered);
+    setHistoryTotal(filtered.length);
   }
 
   async function handleStart() {
     setLoading(true);
     setError("");
     try {
-      const session = await api.focusStart(selectedMinutes * 60);
+      void requestNotificationPermissionIfNeeded();
+      const session = await api.focusCreate(selectedMinutes * 60, selectedGoalId);
       setActiveSession(session);
       onStatus("Focus session started.");
       await refreshHistory();
     } catch (err) {
       const message = (err as Error).message || "Failed to start focus session.";
       if (message.includes("Active session exists")) {
-        const active = await api.focusActive();
+        const active = await api.focusCurrent();
         setActiveSession(active);
         onStatus("Ya hay una sesión activa en otro dispositivo.");
       } else {
@@ -180,45 +231,35 @@ export function FocusView({ onStatus }: Props) {
 
   async function handlePause() {
     if (!activeSession) return;
-    setLoading(true);
-    setError("");
     try {
       const session = await api.focusPause(activeSession.id);
       setActiveSession(session);
+      await refreshHistory();
     } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
+      setError((err as Error).message || "Failed to pause session.");
     }
   }
 
   async function handleResume() {
     if (!activeSession) return;
-    setLoading(true);
-    setError("");
     try {
       const session = await api.focusResume(activeSession.id);
       setActiveSession(session);
+      await refreshHistory();
     } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
+      setError((err as Error).message || "Failed to resume session.");
     }
   }
 
   async function handleCancel() {
     if (!activeSession) return;
-    setLoading(true);
-    setError("");
     try {
       const session = await api.focusCancel(activeSession.id);
       setActiveSession(session);
       onStatus("Focus session canceled.");
       await refreshHistory();
     } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
+      setError((err as Error).message || "Failed to cancel session.");
     }
   }
 
@@ -268,53 +309,88 @@ export function FocusView({ onStatus }: Props) {
         <div className="focus-grid">
           <div className="focus-picker">
             <div className="focus-picker-label">Duration</div>
-            <div className="focus-dial">
-              <svg viewBox="0 0 220 220" className="focus-dial-svg" aria-hidden="true">
-                <circle className="focus-dial-track" cx="110" cy="110" r="90" />
-                <circle
-                  className="focus-dial-progress"
-                  cx="110"
-                  cy="110"
-                  r="90"
-                  style={{
-                    strokeDasharray: `${2 * Math.PI * 90}`,
-                    strokeDashoffset: `${2 * Math.PI * 90 * (1 - dialProgress)}`,
-                  }}
+            <div className="focus-picker-label">Goal</div>
+            <select
+              className="chat-input chat-select chat-select--compact"
+              value={selectedGoalId ?? ""}
+              onChange={(event) =>
+                setSelectedGoalId(event.target.value ? Number(event.target.value) : null)
+              }
+              disabled={
+                goals.length === 0 ||
+                (activeSession !== null &&
+                  activeSession.status !== "completed" &&
+                  activeSession.status !== "canceled")
+              }
+            >
+              {goals.length === 0 ? (
+                <option value="">No time goals available</option>
+              ) : (
+                goals.map((goal) => (
+                  <option key={goal.id} value={goal.id}>
+                    {goal.name}
+                  </option>
+                ))
+              )}
+            </select>
+            {!activeSession || activeSession.status === "completed" || activeSession.status === "canceled" ? (
+              <>
+                <div className="focus-dial">
+                  <svg viewBox="0 0 220 220" className="focus-dial-svg" aria-hidden="true">
+                    <circle className="focus-dial-track" cx="110" cy="110" r="90" />
+                    <circle
+                      className="focus-dial-progress"
+                      cx="110"
+                      cy="110"
+                      r="90"
+                      style={{
+                        strokeDasharray: `${2 * Math.PI * 90}`,
+                        strokeDashoffset: `${2 * Math.PI * 90 * (1 - dialProgress)}`,
+                      }}
+                    />
+                  </svg>
+                  <div className="focus-dial-time">{formatMinutesLabel(selectedMinutes)}</div>
+                  <div className="focus-dial-caption">minutes</div>
+                </div>
+                <input
+                  className="focus-range"
+                  type="range"
+                  min={MIN_MINUTES}
+                  max={MAX_MINUTES}
+                  step={STEP_MINUTES}
+                  value={selectedMinutes}
+                  style={
+                    {
+                      "--range-fill": `${((selectedMinutes - MIN_MINUTES) / (MAX_MINUTES - MIN_MINUTES)) * 100}%`,
+                    } as React.CSSProperties
+                  }
+                  onChange={(event) => setSelectedMinutes(Number(event.target.value))}
                 />
-                <circle className="focus-dial-knob" cx={dialX} cy={dialY} r="9" />
-              </svg>
-              <div className="focus-dial-time">{formatMinutesLabel(selectedMinutes)}</div>
-              <div className="focus-dial-caption">minutes</div>
-            </div>
-            <input
-              className="focus-range"
-              type="range"
-              min={MIN_MINUTES}
-              max={MAX_MINUTES}
-              step={STEP_MINUTES}
-              value={selectedMinutes}
-              onChange={(event) => setSelectedMinutes(Number(event.target.value))}
-            />
+              </>
+            ) : null}
             {!activeSession || activeSession.status === "completed" || activeSession.status === "canceled" ? (
               <button className="btn focus-start" onClick={handleStart} disabled={loading}>
                 Start
               </button>
-            ) : (
+            ) : activeSession.status === "running" ? (
               <div className="focus-actions">
-                {activeSession.status === "running" ? (
-                  <button className="btn btn-ghost" onClick={handlePause} disabled={loading}>
-                    Pause
-                  </button>
-                ) : (
-                  <button className="btn btn-ghost" onClick={handleResume} disabled={loading}>
-                    Resume
-                  </button>
-                )}
-                <button className="btn" onClick={handleCancel} disabled={loading}>
+                <button className="btn focus-start" onClick={handlePause} disabled={loading}>
+                  Pause
+                </button>
+                <button className="btn focus-cancel" onClick={handleCancel} disabled={loading}>
                   Cancel
                 </button>
               </div>
-            )}
+            ) : activeSession.status === "paused" ? (
+              <div className="focus-actions">
+                <button className="btn focus-start" onClick={handleResume} disabled={loading}>
+                  Resume
+                </button>
+                <button className="btn focus-cancel" onClick={handleCancel} disabled={loading}>
+                  Cancel
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className="focus-timer">
@@ -334,7 +410,7 @@ export function FocusView({ onStatus }: Props) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card focus-history-card">
         <div className="focus-history-header">
           <h3>Focus history</h3>
           <div className="chat-subtitle">
@@ -351,6 +427,9 @@ export function FocusView({ onStatus }: Props) {
                   <strong>{Math.round(session.duration_seconds / 60)} min</strong>
                   <div className="chat-subtitle">
                     {new Date(session.started_at).toLocaleString()} · {session.status}
+                    {session.goal_id && goalsById[session.goal_id] ? (
+                      <> · {goalsById[session.goal_id].name}</>
+                    ) : null}
                   </div>
                 </div>
                 <div className={`status-pill status-${session.status}`}>{session.status}</div>

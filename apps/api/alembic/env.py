@@ -1,10 +1,16 @@
 from __future__ import annotations
 from logging.config import fileConfig
+from pathlib import Path
+import sys
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from app.core.config import settings
+API_ROOT = Path(__file__).resolve().parents[1]
+if str(API_ROOT) not in sys.path:
+    sys.path.insert(0, str(API_ROOT))
+
+from app.core.settings import settings
 from app.db.base import Base
-from app import models  # noqa: F401
+from app import models
 
 config = context.config
 

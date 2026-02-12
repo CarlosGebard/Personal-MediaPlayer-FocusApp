@@ -10,15 +10,73 @@ export type User = {
   created_at: string;
 };
 
+export type GoalType = "time" | "count" | "boolean";
+
+export type Goal = {
+  id: number;
+  user_id: number;
+  name: string;
+  goal_type: GoalType;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type GoalsResponse = {
+  items: Goal[];
+  total: number;
+};
+
+export type GoalRevision = {
+  id: number;
+  goal_id: number;
+  target_value: number;
+  valid_from: string;
+  valid_to: string | null;
+  created_at: string;
+};
+
+export type GoalRevisionsResponse = {
+  items: GoalRevision[];
+  total: number;
+};
+
+export type GoalLog = {
+  id: number;
+  goal_id: number;
+  focus_session_id: number | null;
+  date: string;
+  value: number;
+  source: string;
+  created_at: string;
+};
+
+export type GoalLogsResponse = {
+  items: GoalLog[];
+  total: number;
+};
+
+export type GoalHeatmapValue = {
+  date: string;
+  count: number;
+};
+
+export type GoalHeatmapResponse = {
+  goal_id: number;
+  from: string;
+  to: string;
+  unit: "day";
+  values: GoalHeatmapValue[];
+};
+
 export type FocusSession = {
   id: number;
   user_id: number;
+  goal_id: number | null;
   duration_seconds: number;
   started_at: string;
   ended_at: string | null;
   status: "running" | "paused" | "completed" | "canceled";
   paused_seconds: number;
-  paused_at?: string | null;
 };
 
 export type FocusSessionsResponse = {
@@ -26,36 +84,39 @@ export type FocusSessionsResponse = {
   total: number;
 };
 
-export type Track = {
-  id: number;
-  title: string;
-  artist?: string | null;
-  album?: string | null;
-  duration_ms?: number | null;
-  mime: string;
-  size_bytes: number; // Para verificar tamaño del archivo
-  sha256: string;     // Para verificar integridad del archivo , corrupcion o duplicados
+export type DailyStats = {
+  date: string;
+  goal_value_sum: number;
+  goal_logs_count: number;
+  focus_seconds: number;
+  focus_sessions_count: number;
 };
 
-export type PlaylistItem = {
-  id: number;
-  position: number;
-  track: Track;
+export type WeeklyDayStats = {
+  date: string;
+  goal_value_sum: number;
+  focus_seconds: number;
 };
 
-export type Playlist = {
-  id: number;
-  name: string;
-  created_at: string;
-  updated_at: string;
-  items: PlaylistItem[];
+export type WeeklyStats = {
+  start_date: string;
+  end_date: string;
+  goal_value_sum: number;
+  focus_seconds: number;
+  days: WeeklyDayStats[];
 };
-// Esta es la definición autoritativa de una playlist 
-export type PlaylistManifest = {
-  playlist_id: number;
-  name: string;
-  updated_at: string;
-  tracks: Array<Track & { download_url: string }>;
+
+export type YearlyMonthStats = {
+  month: number;
+  goal_value_sum: number;
+  focus_seconds: number;
+};
+
+export type YearlyStats = {
+  year: number;
+  goal_value_sum: number;
+  focus_seconds: number;
+  months: YearlyMonthStats[];
 };
 
 function apiHeaders() {
@@ -77,6 +138,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const message = await resp.text();
     throw new Error(message || resp.statusText);
   }
+  if (resp.status === 204) {
+    return undefined as T;
+  }
   return resp.json() as Promise<T>;
 }
 
@@ -86,18 +150,66 @@ export const api = {
   login: (username: string, password: string) =>
     apiFetch<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
 
-  logout: () => apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" }),
-  focusStart: (durationSeconds: number) =>
-    apiFetch<FocusSession>("/focus/start", {
+  register: (username: string, password: string) =>
+    apiFetch<User>("/auth/register", { method: "POST", body: JSON.stringify({ username, password }) }),
+
+  toggleRegistration: (enabled: boolean, adminPassword: string) =>
+    apiFetch<{ registration_enabled: boolean }>("/auth/disable-registration", {
       method: "POST",
-      body: JSON.stringify({ duration_seconds: durationSeconds }),
+      body: JSON.stringify({ enabled, admin_password: adminPassword }),
     }),
-  focusPause: (id: number) => apiFetch<FocusSession>(`/focus/${id}/pause`, { method: "POST" }),
-  focusResume: (id: number) => apiFetch<FocusSession>(`/focus/${id}/resume`, { method: "POST" }),
-  focusCancel: (id: number) => apiFetch<FocusSession>(`/focus/${id}/cancel`, { method: "POST" }),
-  focusComplete: (id: number) => apiFetch<FocusSession>(`/focus/${id}/complete`, { method: "POST" }),
-  focusActive: async () => {
-    const resp = await fetch(`${apiBase}/focus/active`, {
+
+  logout: () => apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+
+  goals: (limit = 50, offset = 0) =>
+    apiFetch<GoalsResponse>(`/goals?limit=${limit}&offset=${offset}`),
+  goal: (id: number) => apiFetch<Goal>(`/goals/${id}`),
+  createGoal: (payload: { name: string; goal_type: GoalType; is_active?: boolean }) =>
+    apiFetch<Goal>("/goals", { method: "POST", body: JSON.stringify(payload) }),
+  updateGoal: (id: number, payload: { name?: string; goal_type?: GoalType; is_active?: boolean }) =>
+    apiFetch<Goal>(`/goals/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteGoal: (id: number) => apiFetch<void>(`/goals/${id}`, { method: "DELETE" }),
+
+  goalRevisions: (goalId: number) =>
+    apiFetch<GoalRevisionsResponse>(`/goals/${goalId}/revisions`),
+  createGoalRevision: (goalId: number, payload: { target_value: number; valid_from: string; valid_to?: string | null }) =>
+    apiFetch<GoalRevision>(`/goals/${goalId}/revisions`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  goalLogs: (goalId: number, limit = 100, offset = 0) =>
+    apiFetch<GoalLogsResponse>(`/goals/${goalId}/logs?limit=${limit}&offset=${offset}`),
+  createGoalLog: (goalId: number, payload: { date: string; value: number }) =>
+    apiFetch<GoalLog>(`/goals/${goalId}/logs`, { method: "POST", body: JSON.stringify(payload) }),
+  updateGoalLog: (goalId: number, logId: number, payload: { value: number }) =>
+    apiFetch<GoalLog>(`/goals/${goalId}/logs/${logId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteGoalLog: (goalId: number, logId: number) =>
+    apiFetch<void>(`/goals/${goalId}/logs/${logId}`, { method: "DELETE" }),
+  goalHeatmap: (goalId: number, from: string, to: string) =>
+    apiFetch<GoalHeatmapResponse>(`/goals/${goalId}/heatmap?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
+  logsByDateRange: (params: { start_date?: string; end_date?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.start_date) query.set("start_date", params.start_date);
+    if (params.end_date) query.set("end_date", params.end_date);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    const suffix = query.toString();
+    return apiFetch<GoalLogsResponse>(`/logs${suffix ? `?${suffix}` : ""}`);
+  },
+
+  focusCreate: (durationSeconds: number, goalId?: number | null) =>
+    apiFetch<FocusSession>("/focus/sessions", {
+      method: "POST",
+      body: JSON.stringify({ duration_seconds: durationSeconds, goal_id: goalId ?? null }),
+    }),
+  focusPause: (id: number) => apiFetch<FocusSession>(`/focus/sessions/${id}/pause`, { method: "POST" }),
+  focusResume: (id: number) => apiFetch<FocusSession>(`/focus/sessions/${id}/resume`, { method: "POST" }),
+  focusCancel: (id: number) => apiFetch<FocusSession>(`/focus/sessions/${id}/cancel`, { method: "POST" }),
+  focusComplete: (id: number) =>
+    apiFetch<FocusSession>(`/focus/sessions/${id}/complete`, { method: "POST" }),
+  focusCurrent: async () => {
+    const resp = await fetch(`${apiBase}/focus/sessions/current`, {
       credentials: "include",
       headers: apiHeaders(),
     });
@@ -110,31 +222,13 @@ export const api = {
   },
   focusSessions: (limit = 20, offset = 0) =>
     apiFetch<FocusSessionsResponse>(`/focus/sessions?limit=${limit}&offset=${offset}`),
+
+  dailyStats: (date?: string) => {
+    const suffix = date ? `?date=${encodeURIComponent(date)}` : "";
+    return apiFetch<DailyStats>(`/stats/daily${suffix}`);
+  },
+  weeklyStats: () => apiFetch<WeeklyStats>("/stats/weekly"),
+  yearlyStats: () => apiFetch<YearlyStats>("/stats/yearly"),
+
   health: () => apiFetch<{ status: string }>("/health"),
-  tracks: () => apiFetch<Track[]>("/tracks"),
-  scanTracks: () => apiFetch<{ added: number }>("/tracks/scan", { method: "POST" }),
-  playlists: () => apiFetch<Playlist[]>("/playlists"),
-  playlist: (id: number) => apiFetch<Playlist>(`/playlists/${id}`),
-  createPlaylist: (name: string) =>
-    apiFetch<Playlist>("/playlists", { method: "POST", body: JSON.stringify({ name }) }),
-  addPlaylistItem: (id: number, trackId: number, position: number) =>
-    apiFetch<Playlist>(`/playlists/${id}/items`, {
-      method: "POST",
-      body: JSON.stringify({ track_id: trackId, position }),
-    }),
-  deletePlaylistItem: (playlistId: number, itemId: number) =>
-    apiFetch<{ deleted: boolean }>(`/playlists/${playlistId}/items/${itemId}`, {
-      method: "DELETE",
-    }),
-  playlistManifest: (id: number) => apiFetch<PlaylistManifest>(`/playlists/${id}/manifest`),
-  syncPlayback: (payload: Record<string, unknown>) =>
-    apiFetch("/sync/playback", { method: "POST", body: JSON.stringify(payload) }),
 };
-
-export function streamUrl(trackId: number) {
-  return `${apiBase}/tracks/${trackId}/stream`;
-}
-
-export function downloadUrl(trackId: number) {
-  return `${apiBase}/tracks/${trackId}/download`;
-}

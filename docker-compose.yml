@@ -1,71 +1,70 @@
 services:
   postgres:
     image: postgres:16
+    container_name: postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-tempo}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tempo}
-      POSTGRES_DB: ${POSTGRES_DB:-tempo}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - db_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tempo}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 3s
       timeout: 5s
       retries: 5
 
   api:
-    build: ./apps/api
+    container_name: api
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tempo}:${POSTGRES_PASSWORD:-tempo}@postgres:5432/${POSTGRES_DB:-tempo}
-      API_KEY: ${API_KEY:-changeme}
-      BASE_URL: ${BASE_URL:-http://localhost}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      BASE_URL: ${BASE_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      LOG_LEVEL: ${LOG_LEVEL}
+      ADMIN_SECRET: ${ADMIN_SECRET}
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE}
+      AUTH_TOKEN_TTL_MINUTES: ${AUTH_TOKEN_TTL_MINUTES}
       MEDIA_ROOT: /data/media
     volumes:
-      - ./data/media:/data/media
-      - ./apps/api/.env:/app/.env:ro
+      - ./apps/api:/app
+    ports:
+      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   web:
-    build: ./apps/web
+    container_name: web
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.dev
+    command: npm run dev -- --host
     restart: unless-stopped
     environment:
-      VITE_API_BASE: ${VITE_API_BASE:-/api}
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4173" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+      VITE_API_BASE: ${VITE_API_BASE}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./apps/web:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
     depends_on:
-      api:
-        condition: service_healthy
-      web:
-        condition: service_healthy
+      - api
 
 volumes:
   db_data:
-  caddy_data:
-  caddy_config:
+  media_data:

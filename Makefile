@@ -1,10 +1,9 @@
-PROJECT_NAME=tempo
+PROJECT_NAME=ethos
 COMPOSE=docker compose
 
 build:
 	$(COMPOSE) -f docker-compose.yml build
 
-up:
 	$(COMPOSE) -f docker-compose.yml up -d --build
 
 down:
@@ -16,8 +15,7 @@ logs:
 db-migrate:
 	$(COMPOSE) -f docker-compose.yml exec api alembic upgrade head
 
-create-admin-token:
-	@python scripts/create_token.py
+
 
 create-user:
 	$(COMPOSE) -f docker-compose.yml exec api python /app/scripts/create_user.py --username $(username)
@@ -27,3 +25,4 @@ up-dev:
 
 down-dev:
 	$(COMPOSE) -f docker-compose.dev.yml down
+

@@ -9,17 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+COPY requirements.txt ./
 
 RUN pip install --no-cache-dir -U pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 
-COPY scripts /app/scripts
-
 EXPOSE 8000
 
-ENTRYPOINT ["/app/scripts/entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
